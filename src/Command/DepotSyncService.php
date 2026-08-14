@@ -5,9 +5,10 @@ declare(strict_types=1);
 namespace Survos\DepotBundle\Command;
 
 use App\Repository\DeviceRepository;
+use Survos\DepotBundle\Realtime\Event\DepotHeartbeat;
+use Survos\DepotBundle\Realtime\EventPublisherInterface;
 use Survos\DepotBundle\Service\DepotHealthService;
 use Survos\DepotBundle\Service\DepotIdentity;
-use Survos\DepotBundle\Service\SsaiHubBroadcastList;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Attribute\Option;
@@ -15,8 +16,6 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\Process\Process;
-use Symfony\Contracts\HttpClient\Exception\ExceptionInterface;
-use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 /**
  * One class, two commands (method-level #[AsCommand], Symfony 8.1 -- see showcase/CONVENTIONS.md "Symfony commands") --
@@ -41,19 +40,17 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 final class DepotSyncService
 {
     public function __construct(
-        private readonly HttpClientInterface $httpClient,
-        private readonly SsaiHubBroadcastList $hubs,
+        private readonly EventPublisherInterface $events,
         private readonly DepotHealthService $health,
         private readonly DepotIdentity $identity,
         private readonly DeviceRepository $deviceRepository,
         #[Autowire(service: 'monolog.logger.heartbeat')] private readonly LoggerInterface $logger,
         #[Autowire('%env(default::APP_BASE_URL)%')] private readonly ?string $publicUrl,
-        #[Autowire('%env(default::SSAI_HUB_TOKEN)%')] private readonly ?string $token,
         #[Autowire('%env(default::DEPOT_IMGPROXY_URL)%')] private readonly ?string $imgproxyUrl,
     ) {
     }
 
-    #[AsCommand('depot:heartbeat', 'Broadcast this depot\'s presence to every configured ssai hub')]
+    #[AsCommand('depot:heartbeat', 'Publish this depot\'s presence on the depot.events Redis Pub/Sub channel')]
     public function heartbeat(SymfonyStyle $io): int
     {
         $label = $this->identity->label();
@@ -66,49 +63,22 @@ final class DepotSyncService
             return Command::FAILURE;
         }
 
-        $hubs = $this->hubs->all();
-        if ($hubs === []) {
-            $this->logger->warning('heartbeat skipped: no hubs configured');
-            $io->warning('No hub configured (SSAI_HUB_URL / SSAI_HUB_BROADCAST_URLS both empty) -- nothing to broadcast to.');
-
-            return Command::SUCCESS;
-        }
-
         $capabilities = $this->health->detectedCapabilities();
         $imgproxyUrl = trim((string) $this->imgproxyUrl);
-        $payload = [
-            'label'        => $label,
-            'url'          => $url,
-            'tenants'      => ['*'],
-            'capabilities' => $capabilities,
-            'imgproxyUrl'  => $imgproxyUrl !== '' ? $imgproxyUrl : null,
-        ];
-        $ok = 0;
 
-        foreach ($hubs as $hub) {
-            try {
-                $status = $this->httpClient->request('POST', $hubUrl = $hub . '/internal/depots/heartbeat', [
-                    'json'    => $payload,
-                    'headers' => ['X-Internal-Token' => (string) $this->token],
-                    'timeout' => 3.0,
-                ])->getStatusCode();
-                $this->logger->debug('Dispatching heartbeat to ' . $hubUrl, $payload);
-
-                if ($status >= 200 && $status < 300) {
-                    $ok++;
-                    $this->logger->debug('heartbeat sent', ['hub' => $hub, 'label' => $label]);
-                } else {
-                    $this->logger->warning('heartbeat rejected', ['hub' => $hub, 'status' => $status]);
-                }
-            } catch (ExceptionInterface $e) {
-                $this->logger->debug('heartbeat unreachable, skipping', ['hub' => $hub, 'error' => $e->getMessage()]);
-            }
-        }
+        // Best-effort by contract (see EventPublisherInterface's own docblock)
+        // -- a Redis outage here is never a command failure, it's just a
+        // missed heartbeat that the next one (~15s later) papers over.
+        $this->events->publish(new DepotHeartbeat(
+            label: $label,
+            url: $url,
+            tenants: ['*'],
+            capabilities: $capabilities,
+            imgproxyUrl: $imgproxyUrl !== '' ? $imgproxyUrl : null,
+        ));
 
         $io->text(sprintf(
-            'Heartbeat sent to %d/%d hub(s) as "%s". Capabilities: %s',
-            $ok,
-            \count($hubs),
+            'Heartbeat published as "%s". Capabilities: %s',
             $label,
             $capabilities === [] ? '(none detected)' : implode(', ', $capabilities),
         ));

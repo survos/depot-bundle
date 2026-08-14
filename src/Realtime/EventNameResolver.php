@@ -13,7 +13,10 @@ namespace Survos\DepotBundle\Realtime;
 final class EventNameResolver
 {
     /**
-     * @param array<class-string, string> $map
+     * @param array<class-string, string> $map the real catalog is bound
+     *   explicitly in SurvosDepotBundle::registerRealtimeEvents() -- the
+     *   default here only matters for unit tests constructing this
+     *   directly with fixtures.
      */
     public function __construct(
         private readonly array $map = [],

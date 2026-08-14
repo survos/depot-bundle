@@ -5,12 +5,17 @@ declare(strict_types=1);
 namespace Survos\DepotBundle\Realtime;
 
 use Psr\Log\LoggerInterface;
+use Symfony\Component\DependencyInjection\Attribute\Exclude;
 
 /**
  * Fire-and-forget: publishing is best-effort. A Redis failure must never
  * fail the caller — the processing result was already persisted through the
  * authoritative HTTP/API path before this is reached.
+ *
+ * #[Exclude]: needs a live \Redis connection, which nothing autowires --
+ * EventPublisherFactory constructs it directly with `new`.
  */
+#[Exclude]
 final class RedisEventPublisher implements EventPublisherInterface
 {
     public function __construct(

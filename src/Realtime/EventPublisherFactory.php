@@ -9,9 +9,11 @@ use Symfony\Component\Cache\Adapter\RedisAdapter;
 
 /**
  * Registered as EventPublisherInterface's factory in
- * SurvosDepotBundle::registerRealtimeEvents(). Deliberately a runtime
- * factory method, not a PHP branch inside loadExtension() -- %env(...)%
- * config values (enabled/dsn/node_id) only resolve to real values when a
+ * SurvosDepotBundle::registerRealtimeEvents(), which passes $enabled/$dsn/
+ * $channel/$nodeId explicitly from the resolved events.* config (so a plain
+ * YAML override in survos_depot.yaml works, not just the DEPOT_EVENTS_*
+ * env vars). Deliberately a runtime factory method, not a PHP branch inside
+ * loadExtension() -- %env(...)% values only resolve to real values when a
  * service is actually instantiated, not while the container extension is
  * being loaded, so the Null-vs-Redis decision has to live here.
  */

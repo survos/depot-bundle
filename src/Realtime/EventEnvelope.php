@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Survos\DepotBundle\Realtime;
 
+use Symfony\Component\DependencyInjection\Attribute\Exclude;
+
+#[Exclude]
 final readonly class EventEnvelope
 {
     public function __construct(

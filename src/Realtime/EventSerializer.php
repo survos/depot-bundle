@@ -10,6 +10,10 @@ final class EventSerializer
 {
     public function __construct(
         private readonly EventNameResolver $nameResolver,
+        // $nodeId is bound explicitly in SurvosDepotBundle::registerRealtimeEvents(),
+        // sourced from the resolved events.node_id config value (not an
+        // attribute here) so a plain YAML override in survos_depot.yaml
+        // -- not just the DEPOT_NODE_ID env var -- actually takes effect.
         private readonly string $nodeId,
     ) {
     }

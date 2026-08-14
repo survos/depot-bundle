@@ -15,6 +15,11 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  * Long-running: blocks on \Redis::subscribe() until interrupted (Ctrl+C).
  * Not managed by this process -- start it yourself, same as
  * messenger:consume (see depot's own AGENTS.md / handoff docs for why).
+ *
+ * Registered explicitly (not autoconfigure-only) in
+ * SurvosDepotBundle::registerRealtimeEvents(), which passes $dsn/$channel
+ * from the resolved events.* config -- unconditional, not gated by
+ * appliance_enabled, since ssai needs this command too.
  */
 #[AsCommand('depot:events:subscribe', 'Subscribe to the depot.events Redis Pub/Sub channel and dispatch received events locally')]
 final class SubscribeEventsCommand extends Command
