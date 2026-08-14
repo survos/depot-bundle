@@ -1,0 +1,34 @@
+{
+    "name": "survos/depot-bundle",
+    "type": "symfony-bundle",
+    "description": "StoryStation scan-job orchestration for depot appliances -- ADF batch scanning, ai-tools crop/deskew hand-off, and the ssai push/poll bridge -- plus the Realtime/ Redis Pub/Sub event bus shared with ssai (the central hub).",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.4",
+        "survos/kit-bundle": "^2.17",
+        "symfony/cache": "^8.0",
+        "symfony/console": "^8.0",
+        "symfony/http-client": "^8.0",
+        "symfony/messenger": "^8.0",
+        "symfony/process": "^8.0",
+        "symfony/uid": "^8.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Survos\\DepotBundle\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Survos\\DepotBundle\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "phpunit": "phpunit tests/"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
