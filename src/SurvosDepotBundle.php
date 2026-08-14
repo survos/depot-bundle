@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Survos\DepotBundle;
 
+use Survos\DepotBundle\Realtime\Event\DepotHeartbeat;
 use Survos\DepotBundle\Realtime\Event\OcrCompleted;
 use Survos\DepotBundle\Realtime\EventNameResolver;
 use Survos\DepotBundle\Realtime\EventPublisherFactory;
 use Survos\DepotBundle\Realtime\EventPublisherInterface;
 use Survos\DepotBundle\Realtime\EventSerializer;
+use Survos\DepotBundle\Realtime\RedisEventSubscriber;
+use Survos\DepotBundle\Realtime\SubscribeEventsCommand;
 use Survos\Kit\AbstractSurvosBundle;
 use Survos\Kit\SurvosKitBundle;
 use Survos\Kit\Traits\HasConfigurableRoutes;
@@ -145,6 +148,7 @@ final class SurvosDepotBundle extends AbstractSurvosBundle
             ->setArgument('$map', [
                 // Phase 3+ registers more event DTOs here as they're added.
                 OcrCompleted::class => 'asset.ocr.completed',
+                DepotHeartbeat::class => 'depot.heartbeat',
             ]);
 
         $builder->register(EventSerializer::class, EventSerializer::class)
@@ -158,6 +162,22 @@ final class SurvosDepotBundle extends AbstractSurvosBundle
             ->setArgument('$channel', $config['channel'])
             ->setArgument('$nodeId', $config['node_id'])
             ->setAutowired(true); // fills $serializer, $logger
+
+        // Consuming side: decode+dispatch logic is autowired normally
+        // (RedisEventSubscriber has no env-derived args). The command itself
+        // needs the raw dsn/channel to open its own blocking connection --
+        // registered here (not autowired) for the same reason
+        // EventPublisherInterface is: explicit, not left to autoconfigure.
+        $builder->register(RedisEventSubscriber::class, RedisEventSubscriber::class)
+            ->setAutowired(true);
+
+        // autoconfigure (not a manual addTag) so the #[AsCommand] attribute's
+        // name/description are what actually register it as a console command.
+        $builder->register(SubscribeEventsCommand::class, SubscribeEventsCommand::class)
+            ->setArgument('$dsn', $config['dsn'])
+            ->setArgument('$channel', $config['channel'])
+            ->setAutowired(true) // fills $subscriber
+            ->setAutoconfigured(true);
     }
 
     public function build(ContainerBuilder $container): void
