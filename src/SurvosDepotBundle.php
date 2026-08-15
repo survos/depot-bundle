@@ -161,7 +161,7 @@ final class SurvosDepotBundle extends AbstractSurvosBundle
             ->setArgument('$dsn', $config['dsn'])
             ->setArgument('$channel', $config['channel'])
             ->setArgument('$nodeId', $config['node_id'])
-            ->setAutowired(true); // fills $serializer, $logger
+            ->setAutowired(true); // fills $serializer, $logger, $pulse (CacheItemPoolInterface -- cache.app)
 
         // Consuming side: decode+dispatch logic is autowired normally
         // (RedisEventSubscriber has no env-derived args). The command itself

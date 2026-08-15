@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Survos\DepotBundle\Realtime;
 
+use Psr\Cache\CacheItemPoolInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Cache\Adapter\RedisAdapter;
 
@@ -26,6 +27,7 @@ final class EventPublisherFactory
         string $nodeId,
         EventSerializer $serializer,
         LoggerInterface $logger,
+        ?CacheItemPoolInterface $pulse = null,
     ): EventPublisherInterface {
         $dsn = trim($dsn);
         if (!$enabled || '' === $dsn) {
@@ -45,6 +47,7 @@ final class EventPublisherFactory
             $channel,
             $serializer,
             $logger,
+            $pulse,
         );
     }
 }

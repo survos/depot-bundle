@@ -6,6 +6,9 @@ namespace Survos\DepotBundle\Service;
 
 use App\Entity\Device;
 use App\Repository\DeviceRepository;
+use Psr\Cache\CacheItemPoolInterface;
+use Survos\DepotBundle\Realtime\RedisEventPublisher;
+use Symfony\Component\Cache\Adapter\RedisAdapter;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\Process\Process;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
@@ -29,7 +32,9 @@ final class DepotHealthService
         #[Autowire('%env(default::AI_TOOLS_URL)%')] private readonly ?string $aiToolsUrl,
         #[Autowire('%env(default::SSAI_HUB_TOKEN)%')] private readonly ?string $ssaiHubToken,
         #[Autowire('%env(default::ZEBRA_USB_DEVICE)%')] private readonly ?string $zebraUsbDevice,
+        #[Autowire('%env(default::DEPOT_EVENTS_DSN)%')] private readonly ?string $depotEventsDsn,
         private readonly DeviceRepository $deviceRepository,
+        private readonly CacheItemPoolInterface $cache,
     ) {
     }
 
@@ -85,6 +90,77 @@ final class DepotHealthService
     {
         return $this->systemdUnitActive('depot-scan-worker.service')
             || $this->processRunning('messenger:consume scan_jobs');
+    }
+
+    /**
+     * True if the Symfony Scheduler worker (src/Schedule.php: depot:heartbeat
+     * every 15s, depot:scan-devices every 2min) is running, whichever way it
+     * was started -- same "systemd unit or bare foreground process" pattern
+     * as scanWorkerActive() above. Without this running, nothing fires either
+     * recurring command, silently -- the whole point of surfacing it here.
+     */
+    public function schedulerActive(): bool
+    {
+        return $this->systemdUnitActive('depot-scheduler.service')
+            || $this->processRunning('messenger:consume scheduler_default');
+    }
+
+    /**
+     * Every device `depot:scan-devices` has ever confirmed, freshest first --
+     * the home page's own view into App\Entity\Device, so "is the scanner
+     * actually being detected" doesn't require a DB console. Freshness
+     * (Device::FRESH_TTL_SECONDS) is left to the caller/template: this
+     * returns everything, stale rows included, since a device that recently
+     * *stopped* being detected is exactly the kind of thing worth seeing.
+     *
+     * @return list<Device>
+     */
+    public function devices(): array
+    {
+        return $this->deviceRepository->findAllOrdered();
+    }
+
+    /**
+     * Turns the Redis event bus from a black box into "here's the last
+     * thing we actually tried to send and whether it worked" -- reachable
+     * is a live PING right now (independent of whether publishing is even
+     * configured/enabled), lastPulse is what RedisEventPublisher recorded
+     * on its last publish() call (see RedisEventPublisher::PULSE_CACHE_KEY).
+     * A depot that's been failing to publish for other reasons (e.g. the
+     * device-table bug this was built to diagnose) still shows Redis itself
+     * as reachable, so the two failure modes don't get conflated.
+     *
+     * @return array{configured: bool, reachable: bool, lastPulse: array{at: string, channel: string, type: string, success: bool, error: ?string}|null}
+     */
+    public function redisStatus(): array
+    {
+        $dsn = trim((string) $this->depotEventsDsn);
+
+        $lastPulse = null;
+        try {
+            $item = $this->cache->getItem(RedisEventPublisher::PULSE_CACHE_KEY);
+            if ($item->isHit()) {
+                $lastPulse = $item->get();
+            }
+        } catch (\Throwable) {
+        }
+
+        return [
+            'configured' => $dsn !== '',
+            'reachable' => $dsn !== '' && $this->pingRedis($dsn),
+            'lastPulse' => $lastPulse,
+        ];
+    }
+
+    private function pingRedis(string $dsn): bool
+    {
+        try {
+            $redis = RedisAdapter::createConnection($dsn, ['timeout' => 1.0]);
+
+            return $redis instanceof \Redis && $redis->ping() !== false;
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /** @return array{configured: bool, url: ?string, reachable: bool} */
