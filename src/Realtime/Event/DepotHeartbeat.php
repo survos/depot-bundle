@@ -19,6 +19,7 @@ final readonly class DepotHeartbeat
         public array $tenants,
         public array $capabilities,
         public ?string $imgproxyUrl = null,
+        public bool $aiToolsReachable = false,
     ) {
     }
 }

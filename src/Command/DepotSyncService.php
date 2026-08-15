@@ -65,6 +65,7 @@ final class DepotSyncService
 
         $capabilities = $this->health->detectedCapabilities();
         $imgproxyUrl = trim((string) $this->imgproxyUrl);
+        $aiToolsReachable = $this->health->aiToolsReachable();
 
         // Best-effort by contract (see EventPublisherInterface's own docblock)
         // -- a Redis outage here is never a command failure, it's just a
@@ -75,12 +76,14 @@ final class DepotSyncService
             tenants: ['*'],
             capabilities: $capabilities,
             imgproxyUrl: $imgproxyUrl !== '' ? $imgproxyUrl : null,
+            aiToolsReachable: $aiToolsReachable,
         ));
 
         $io->text(sprintf(
-            'Heartbeat published as "%s". Capabilities: %s',
+            'Heartbeat published as "%s". Capabilities: %s. ai-tools: %s',
             $label,
             $capabilities === [] ? '(none detected)' : implode(', ', $capabilities),
+            $aiToolsReachable ? 'reachable' : 'NOT reachable',
         ));
 
         return Command::SUCCESS;
@@ -136,6 +139,13 @@ final class DepotSyncService
         $io->text($found > 0
             ? sprintf('%d known device(s) recorded.', $found)
             : 'No known devices found.');
+
+        // Piggybacked on this cadence rather than the 15s heartbeat: it's a
+        // ~2s HTTP round-trip, the same reasoning that already keeps
+        // scanimage's ~20s enumeration off the fast path. heartbeat() reads
+        // the cached result via DepotHealthService::aiToolsReachable().
+        $aiToolsReachable = $this->health->refreshAiToolsHealth();
+        $io->text('ai-tools: ' . ($aiToolsReachable ? 'reachable' : 'NOT reachable'));
 
         return Command::SUCCESS;
     }

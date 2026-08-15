@@ -24,6 +24,8 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  */
 final class DepotHealthService
 {
+    private const AI_TOOLS_HEALTH_CACHE_KEY = 'depot.ai_tools_reachable';
+
     public function __construct(
         #[Autowire(service: 'ai_tools')] private readonly HttpClientInterface $aiToolsClient,
         #[Autowire(service: 'ssai.hub')] private readonly HttpClientInterface $ssaiHubClient,
@@ -167,6 +169,40 @@ final class DepotHealthService
     public function aiToolsStatus(): array
     {
         return $this->pingService($this->aiToolsUrl, $this->aiToolsClient, '/status');
+    }
+
+    /**
+     * Live probe, same "write slow, read fast" split as scannerDetected()/
+     * detectedCapabilities() above -- but cached (cache.app) instead of a DB
+     * row, since ai-tools reachability isn't physical hardware worth an
+     * audit trail, just a point-in-time fact the fast heartbeat path needs
+     * to read cheaply. Called from depot:scan-devices (the slow, ~20s
+     * cadence) so the ~2s HTTP ping never sits on the 15s heartbeat path;
+     * aiToolsReachable() below is what heartbeat() actually reads.
+     */
+    public function refreshAiToolsHealth(): bool
+    {
+        $reachable = $this->aiToolsStatus()['reachable'];
+
+        $item = $this->cache->getItem(self::AI_TOOLS_HEALTH_CACHE_KEY);
+        $item->set($reachable);
+        $item->expiresAfter(Device::FRESH_TTL_SECONDS);
+        $this->cache->save($item);
+
+        return $reachable;
+    }
+
+    /**
+     * Cached read only -- never probes live. False (not "unknown") when the
+     * cache is empty or has expired: depot:scan-devices hasn't confirmed
+     * ai-tools reachable within Device::FRESH_TTL_SECONDS, so treat it the
+     * same as "not reachable" rather than silently reporting stale-but-true.
+     */
+    public function aiToolsReachable(): bool
+    {
+        $item = $this->cache->getItem(self::AI_TOOLS_HEALTH_CACHE_KEY);
+
+        return $item->isHit() && $item->get() === true;
     }
 
     /**
