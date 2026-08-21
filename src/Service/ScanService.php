@@ -15,7 +15,95 @@ final class ScanService
         #[Autowire('%env(SCANIMAGE_RESOLUTION)%')] private readonly string $resolution = '300',
         #[Autowire('%env(SCANIMAGE_MODE)%')] private readonly string $mode = 'Color',
         #[Autowire('%env(SCANIMAGE_SOURCE)%')] private readonly string $source = 'ADF Duplex',
+        /**
+         * scanimage output format. Defaults to jpeg for backward compatibility,
+         * but note what that costs: scanimage exposes NO quality knob (only
+         * --format), and the Epson writes JPEG at roughly libjpeg q75 --
+         * measured 2026-08-20 from the quantization table of a real scan, which
+         * was the standard Annex K table halved. On a normally-exposed print
+         * that is invisible; in dense shadow it is not. Confirmed live on
+         * cheztac-0005 page-009 (a dim bedroom snapshot with a dark framed
+         * portrait on the wall): at 1:1 the portrait showed hard 8x8 block
+         * edges and magenta/cyan chroma speckle through tones that are smooth
+         * on the actual print. Resolution was not the limiting factor -- the
+         * quantizer was. Set to png for lossless capture when shadow detail
+         * matters more than disk.
+         */
+        #[Autowire('%env(default::SCANIMAGE_FORMAT)%')] private readonly ?string $formatOverride = null,
+        /**
+         * Which side of each sheet the ADF emits FIRST. This is not a fixed
+         * property of the scanner -- it depends on how the operator loads the
+         * feeder, so it has to be a per-station setting rather than a constant.
+         *
+         * false (default) = written/back side comes out first. That is the
+         * documented postcard workflow: faceup, landscape, top edge first (see
+         * pairFiles(), confirmed live 2026-08-03).
+         *
+         * true = photo side comes out first. That is what the FF-680W's own
+         * recommended loading (upside down, faces out) produces -- confirmed
+         * live 2026-08-20 by reading cheztac-0004's page-001 (a portrait) and
+         * page-002 (its handwritten back), which the default mapping had
+         * exactly inverted.
+         */
+        #[Autowire('%env(bool:default::SCAN_DUPLEX_PHOTO_SIDE_FIRST)%')] private readonly bool $photoSideFirst = false,
     ) {
+    }
+
+    /** scanimage's --format value. */
+    private function format(): string
+    {
+        $format = strtolower(trim((string) $this->formatOverride));
+
+        return $format !== '' ? $format : 'jpeg';
+    }
+
+    /**
+     * File extension for the configured format. Kept separate from format()
+     * because scanimage takes "jpeg"/"tiff" while the files it writes are
+     * .jpg/.tif -- every glob and filename pattern below goes through this so
+     * a format change can't leave half the pipeline looking for the old
+     * extension.
+     */
+    private function extension(): string
+    {
+        return match ($this->format()) {
+            'png'  => 'png',
+            'tiff' => 'tif',
+            'pnm'  => 'pnm',
+            'pdf'  => 'pdf',
+            default => 'jpg',
+        };
+    }
+
+    /**
+     * Every page file this station could have written, newest format or not.
+     * Deliberately NOT just the current extension: switching a station to png
+     * must not make the pages it already scanned as .jpg invisible to batch
+     * numbering (which would restart at 1 and collide) or to deletion (which
+     * would silently leave them behind).
+     *
+     * @return list<string>
+     */
+    private function pageFiles(string $outputDir): array
+    {
+        $files = glob(rtrim($outputDir, '/') . '/page-*.{jpg,png,tif,pnm,pdf}', \GLOB_BRACE) ?: [];
+        sort($files);
+
+        return array_values($files);
+    }
+
+    /**
+     * Maps a sheet's two pages to front/back per $photoSideFirst. Single place
+     * both pairing paths go through, so the streaming scan and the offline
+     * pairExistingScans() can never disagree about which side is which.
+     *
+     * @return array{front: string, back: string}
+     */
+    private function pairSides(string $firstOut, string $secondOut): array
+    {
+        return $this->photoSideFirst
+            ? ['front' => $firstOut, 'back' => $secondOut]
+            : ['front' => $secondOut, 'back' => $firstOut];
     }
 
     /**
@@ -30,7 +118,7 @@ final class ScanService
         }
 
         $device = $this->configuredDevice !== '' ? $this->configuredDevice : $this->discoverFastFotoDevice();
-        $pattern = rtrim($outputDir, '/') . '/page-%03d.jpg';
+        $pattern = rtrim($outputDir, '/') . '/page-%03d.' . $this->extension();
 
         // scanimage's own batch numbering always restarts at 1 unless told
         // otherwise -- an intake normally spans several reload-the-feeder
@@ -55,7 +143,7 @@ final class ScanService
                 '--source', $this->source,
                 '--mode', $this->mode,
                 '--resolution', $this->resolution,
-                '--format=jpeg',
+                '--format=' . $this->format(),
                 '--batch=' . $pattern,
                 '--batch-start=' . $batchStart,
             ], timeout: 300))->mustRun();
@@ -73,7 +161,7 @@ final class ScanService
         // ScanJobRunner already handed off, under new (wrong) sequence
         // numbers.
         $files = array_values(array_filter(
-            glob(rtrim($outputDir, '/') . '/page-*.jpg') ?: [],
+            $this->pageFiles($outputDir),
             static fn(string $f): bool => self::pageNumber($f) >= $batchStart,
         ));
         sort($files);
@@ -114,7 +202,7 @@ final class ScanService
         }
 
         $device = $this->configuredDevice !== '' ? $this->configuredDevice : $this->discoverFastFotoDevice();
-        $pattern = rtrim($outputDir, '/') . '/page-%03d.jpg';
+        $pattern = rtrim($outputDir, '/') . '/page-%03d.' . $this->extension();
         $batchStart = $this->nextBatchStart($outputDir);
 
         $process = new Process([
@@ -123,7 +211,7 @@ final class ScanService
             '--source', $this->source,
             '--mode', $this->mode,
             '--resolution', $this->resolution,
-            '--format=jpeg',
+            '--format=' . $this->format(),
             '--batch=' . $pattern,
             '--batch-start=' . $batchStart,
         ], timeout: 300);
@@ -175,7 +263,7 @@ final class ScanService
     private function collectStablePairs(string $outputDir, int &$nextExpected, ?string &$pendingSingle): \Generator
     {
         while (true) {
-            $file = rtrim($outputDir, '/') . '/' . sprintf('page-%03d.jpg', $nextExpected);
+            $file = rtrim($outputDir, '/') . '/' . sprintf('page-%03d.%s', $nextExpected, $this->extension());
             if (!is_file($file) || !self::isFileStable($file)) {
                 return;
             }
@@ -183,10 +271,9 @@ final class ScanService
             if ($pendingSingle === null) {
                 $pendingSingle = $file;
             } else {
-                // ADF's first page out of each sheet is the facedown/written
-                // side, the second the faceup/photo side -- see pairFiles()'s
-                // own docblock for how this was confirmed live.
-                yield ['front' => $file, 'back' => $pendingSingle];
+                // Which of the two is the photo depends on feeder loading --
+                // see pairSides() / $photoSideFirst.
+                yield $this->pairSides($pendingSingle, $file);
                 $pendingSingle = null;
             }
 
@@ -210,7 +297,7 @@ final class ScanService
 
     private function nextBatchStart(string $outputDir): int
     {
-        $files = glob(rtrim($outputDir, '/') . '/page-*.jpg') ?: [];
+        $files = $this->pageFiles($outputDir);
         $max = 0;
         foreach ($files as $file) {
             $max = max($max, self::pageNumber($file));
@@ -233,11 +320,10 @@ final class ScanService
      */
     public function pairExistingScans(string $outputDir): array
     {
-        $files = glob(rtrim($outputDir, '/') . '/page-*.jpg') ?: [];
-        sort($files);
+        $files = $this->pageFiles($outputDir);
 
         if ($files === []) {
-            throw new \RuntimeException(sprintf('No page-*.jpg files found in %s.', $outputDir));
+            throw new \RuntimeException(sprintf('No page-* image files found in %s.', $outputDir));
         }
 
         return $this->pairFiles($files);
@@ -258,15 +344,9 @@ final class ScanService
 
         $pairs = [];
         for ($i = 0; $i < \count($files); $i += 2) {
-            // Loading postcards per Epson's "Photo mode" convention (faceup,
-            // landscape, top edge first -- the only way to get a duplex pass
-            // of a photo + its handwritten back at all, per the FF-680W
-            // user's guide), the ADF's first page out of each sheet is
-            // consistently the facedown/written side and the second is the
-            // faceup/photo side -- confirmed live 2026-08-03 by reading the
-            // actual scanned files for two different postcards. The naive
-            // $files[$i]=front assumption had this backwards for every pair.
-            $pairs[] = ['front' => $files[$i + 1], 'back' => $files[$i]];
+            // Which side comes out first is a property of how the feeder was
+            // loaded, not of the scanner -- see pairSides() / $photoSideFirst.
+            $pairs[] = $this->pairSides($files[$i], $files[$i + 1]);
         }
 
         return $pairs;

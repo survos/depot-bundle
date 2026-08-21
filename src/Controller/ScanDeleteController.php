@@ -48,7 +48,14 @@ final class ScanDeleteController extends AbstractController
             return new JsonResponse(['ok' => true, 'deleted' => 0]);
         }
 
-        $files = glob(rtrim($dir, '/') . '/page-*.jpg') ?: [];
+        // Every page file, whatever format the station was set to when it wrote
+        // them (see ScanService::pageFiles()), plus scanimage's *.part temporaries
+        // -- a partial left behind by an interrupted batch survived the old
+        // page-*.jpg glob and then sat in the directory forever, invisible to both
+        // this purge and to batch numbering. Found live 2026-08-20 purging
+        // cheztac-0002: 15 pages deleted, page-016.jpg.part left behind.
+        $files = glob(rtrim($dir, '/') . '/page-*.{jpg,png,tif,pnm,pdf}', \GLOB_BRACE) ?: [];
+        $files = array_merge($files, glob(rtrim($dir, '/') . '/page-*.part') ?: []);
         (new Filesystem())->remove($files);
 
         return new JsonResponse(['ok' => true, 'deleted' => \count($files)]);
