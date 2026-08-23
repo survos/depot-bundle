@@ -53,6 +53,7 @@ final readonly class ScanTriggerService
 
         foreach ($pairs as $pair) {
             $analysis = null;
+            $rect = null;
 
             if ($crop) {
                 // Cropping is part of the critical path, not an enhancement:
@@ -73,6 +74,7 @@ final readonly class ScanTriggerService
                     ));
                 }
                 $analysis = $cropResult['analysis'] ?? null;
+                $rect     = $cropResult['rect'] ?? null;
             }
 
             $this->ssaiScanHubService->ingestPair(
@@ -82,8 +84,29 @@ final readonly class ScanTriggerService
                 $sequence,
                 $pair['front'],
                 $pair['back'],
-                $analysis,
             );
+
+            // The crop rect and analysis travel on their OWN call, exactly as
+            // CropReportRunner does it on the live scan-job path.
+            //
+            // This used to be passed as a 7th argument to ingestPair(), which takes six.
+            // PHP silently discards surplus arguments to a non-variadic function, so when
+            // the signature moved analysis onto reportCrop() this caller kept "working"
+            // while throwing the data away -- no error, no warning. The visible symptom
+            // was that scans triggered through this path had crop_rect NULL AND
+            // crop_error NULL, so ssai kept the full scan-bed image: a 360px thumbnail of
+            // an 8.5x15.5in bed, in which the actual photo is a small patch. Identical to
+            // a working scan unless you look at the pixels.
+            if ($crop) {
+                $this->ssaiScanHubService->reportCrop(
+                    $tenant,
+                    $intakeCode,
+                    $sequence,
+                    $rect,
+                    null,
+                    $analysis,
+                );
+            }
 
             $result[] = [
                 'accession' => $accession,
