@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Survos\DepotBundle\Service;
 
+use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\Process\Exception\ProcessFailedException;
 use Symfony\Component\Process\Process;
@@ -46,7 +47,55 @@ final class ScanService
          * exactly inverted.
          */
         #[Autowire('%env(bool:default::SCAN_DUPLEX_PHOTO_SIDE_FIRST)%')] private readonly bool $photoSideFirst = false,
+        /**
+         * Feeder width in MILLIMETRES -- the width the ADF guides are set to, i.e. the
+         * long edge of the photo, since stock is loaded landscape.
+         *
+         * Loading landscape is what makes this worth doing: if the long edge is the width,
+         * nothing in the stack can be TALLER than the width either, so one number bounds
+         * both axes and the acquire area becomes a width x width square. A 6in photo drops
+         * the capture from the full 8.5x15.5in bed to 6x6in -- about a quarter of the
+         * pixels -- which is less USB transfer (the dominant cost of a scan), a smaller
+         * file, and a preview whose 360px thumbnail covers 6in instead of 15.5in.
+         *
+         * This is a rough first pass on purpose. It never cuts into the photo (the sheet
+         * cannot exceed the guides) and it removes the empty bed, which is all margin. Fine
+         * cropping to the actual paper edge still happens downstream in ai-tools.
+         *
+         * Left empty = scan the whole bed, the previous behaviour.
+         *
+         * Not obtainable from the hardware: the scanner reports no guide position, and its
+         * ADF/CRP capability is a -20..+20 margin ADJUSTMENT, not paper detection --
+         * confirmed live 2026-08-23, where --adf-crp=yes changed neither the emitted #ACQ
+         * (still 0,0-5096x9283) nor the output size. So the operator has to say.
+         */
+        #[Autowire('%env(default::SCAN_FEEDER_WIDTH_MM)%')] private readonly ?string $feederWidthMm = null,
+        private readonly ?LoggerInterface $logger = null,
     ) {
+    }
+
+    /**
+     * Acquire-area arguments for scanimage, or [] for the whole bed.
+     *
+     * Applied at CAPTURE time rather than cropping afterwards: -x/-y change the #ACQ the
+     * backend sends, so the scanner never digitises or transfers the empty bed in the
+     * first place. Cropping after the fact would cost the transfer anyway.
+     *
+     * @return list<string>
+     */
+    private function acquireArea(): array
+    {
+        $mm = (float) trim((string) $this->feederWidthMm);
+        if ($mm <= 0) {
+            return [];
+        }
+
+        // Clamped to the bed. -x is limited to 215.9mm and -y to 393.7mm on the FF-680W;
+        // asking for more is an error, not a bigger scan.
+        $x = min($mm, 215.9);
+        $y = min($mm, 393.7);
+
+        return ['-x', (string) $x, '-y', (string) $y];
     }
 
     /** scanimage's --format value. */
@@ -144,6 +193,7 @@ final class ScanService
                 '--mode', $this->mode,
                 '--resolution', $this->resolution,
                 '--format=' . $this->format(),
+                ...$this->acquireArea(),
                 '--batch=' . $pattern,
                 '--batch-start=' . $batchStart,
             ], timeout: 300))->mustRun();
@@ -212,6 +262,7 @@ final class ScanService
             '--mode', $this->mode,
             '--resolution', $this->resolution,
             '--format=' . $this->format(),
+            ...$this->acquireArea(),
             '--batch=' . $pattern,
             '--batch-start=' . $batchStart,
         ], timeout: 300);
@@ -357,10 +408,33 @@ final class ScanService
         $process = new Process(['scanimage', '-L']);
         $process->mustRun();
 
+        // USB FIRST, then anything else. The FF-680W is also a network scanner, so when it
+        // is on wifi `scanimage -L` lists BOTH an epsonds:net: and an epsonds:libusb:
+        // entry for the same physical device -- and returning whichever came first meant a
+        // 600dpi duplex batch could silently go over wifi. Found live 2026-08-24: a scan
+        // ran as epsonds:net:192.168.86.55 and took ~4 MINUTES to produce its first pair
+        // (15MB/page at 600dpi), with the ADF stalling after one sheet because the host
+        // could not drain fast enough. Over USB the same batch is seconds per pair.
+        //
+        // Two passes rather than a sort: the preference is absolute, not a ranking, and
+        // this way a station with only a network path still works instead of failing.
+        $candidates = [];
         foreach (explode("\n", $process->getOutput()) as $line) {
             if (str_contains($line, 'FF-680W') && preg_match('/device `([^\x27]+)\x27/', $line, $m) === 1) {
-                return $m[1];
+                $candidates[] = $m[1];
             }
+        }
+
+        foreach ($candidates as $device) {
+            if (str_contains($device, ':libusb:')) {
+                return $device;
+            }
+        }
+
+        if ($candidates !== []) {
+            $this->logger?->warning('No USB path to the FF-680W; falling back to {device}. Expect a much slower scan.', ['device' => $candidates[0]]);
+
+            return $candidates[0];
         }
 
         throw new \RuntimeException('No Epson FastFoto FF-680W found via `scanimage -L`; set SCANIMAGE_DEVICE explicitly.');
