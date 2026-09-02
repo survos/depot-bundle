@@ -9,6 +9,9 @@ use Survos\DepotBundle\Realtime\Event\DepotHeartbeat;
 use Survos\DepotBundle\Realtime\EventPublisherInterface;
 use Survos\DepotBundle\Service\DepotHealthService;
 use Survos\DepotBundle\Service\DepotIdentity;
+use Survos\DepotBundle\Service\SsaiHubBroadcastList;
+use Symfony\Contracts\HttpClient\Exception\ExceptionInterface as HttpExceptionInterface;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Attribute\Option;
@@ -47,10 +50,15 @@ final class DepotSyncService
         #[Autowire(service: 'monolog.logger.heartbeat')] private readonly LoggerInterface $logger,
         #[Autowire('%env(default::APP_BASE_URL)%')] private readonly ?string $publicUrl,
         #[Autowire('%env(default::DEPOT_IMGPROXY_URL)%')] private readonly ?string $imgproxyUrl,
+        private readonly SsaiHubBroadcastList $hubs,
+        #[Autowire(service: 'ssai.hub')] private readonly HttpClientInterface $ssaiHubClient,
+        private readonly HttpClientInterface $httpClient,
+        #[Autowire('%env(default::SSAI_HUB_TOKEN)%')] private readonly ?string $ssaiHubToken,
     ) {
     }
 
-    #[AsCommand('depot:heartbeat', 'Publish this depot\'s presence on the depot.events Redis Pub/Sub channel')]
+    #[AsCommand('depot:heartbeat', 'Report this depot\'s presence to every configured ssai hub (and publish on the depot.events Redis channel)')]
+
     public function heartbeat(SymfonyStyle $io): int
     {
         $label = $this->identity->label();
@@ -67,26 +75,117 @@ final class DepotSyncService
         $imgproxyUrl = trim((string) $this->imgproxyUrl);
         $aiToolsReachable = $this->health->aiToolsReachable();
 
+        $payload = [
+            'label' => $label,
+            'url' => $url,
+            'tenants' => ['*'],
+            'capabilities' => $capabilities,
+            'imgproxyUrl' => $imgproxyUrl !== '' ? $imgproxyUrl : null,
+            'aiToolsReachable' => $aiToolsReachable,
+        ];
+
+        // The authoritative write. Each hub records this over HTTP, so a station
+        // and its hub only need the tunnel they already use for scan files --
+        // no shared broker, and nothing to expose.
+        //
+        // This POST was removed at some point and only the Redis publish below
+        // was left, which quietly broke every deployment where depot and ssai are
+        // not the same machine: Redis pub/sub drops a message when nobody is
+        // subscribed, so depot reported success every 15s while the hub's
+        // Depot.lastSeenAt never moved and its capture screen kept "Start
+        // Scanning" disabled, with no error on either side. A depot on a
+        // ThinkPad at a customer site and a hub in production can never share
+        // 127.0.0.1:6379, and a cloudflared HTTP ingress will not carry 6379.
+        $accepted = $this->broadcastHeartbeat($payload);
+
         // Best-effort by contract (see EventPublisherInterface's own docblock)
         // -- a Redis outage here is never a command failure, it's just a
-        // missed heartbeat that the next one (~15s later) papers over.
+        // missed heartbeat that the next one (~15s later) papers over. Kept as
+        // the low-latency trigger: where both processes share a Redis it flips
+        // the hub's depot-online dot in ~1.5s instead of waiting for a poll.
         $this->events->publish(new DepotHeartbeat(
             label: $label,
             url: $url,
-            tenants: ['*'],
+            tenants: $payload['tenants'],
             capabilities: $capabilities,
-            imgproxyUrl: $imgproxyUrl !== '' ? $imgproxyUrl : null,
+            imgproxyUrl: $payload['imgproxyUrl'],
             aiToolsReachable: $aiToolsReachable,
         ));
 
+        $hubCount = \count($this->hubs->all());
         $io->text(sprintf(
-            'Heartbeat published as "%s". Capabilities: %s. ai-tools: %s',
+            'Heartbeat sent as "%s" to %d/%d hub%s. Capabilities: %s. ai-tools: %s',
             $label,
+            $accepted,
+            $hubCount,
+            $hubCount === 1 ? '' : 's',
             $capabilities === [] ? '(none detected)' : implode(', ', $capabilities),
             $aiToolsReachable ? 'reachable' : 'NOT reachable',
         ));
 
-        return Command::SUCCESS;
+        // A heartbeat no hub accepted is a failure worth surfacing -- silence
+        // here is what made this invisible for so long. Redis still got its
+        // publish, so nothing is lost by reporting it.
+        return $accepted === 0 && $hubCount > 0 ? Command::FAILURE : Command::SUCCESS;
+    }
+
+    /**
+     * POSTs the heartbeat to every hub in SsaiHubBroadcastList, best-effort.
+     *
+     * All hubs, not just primary(): the list exists to be broadcast to -- see
+     * DepotHealthService::ssaiHubStatuses(), whose own docblock already calls
+     * these "every hub this depot broadcasts to (heartbeat + scan results)".
+     * A station demoing at a site may legitimately report to production and a
+     * dev hub at once, and one unreachable hub must not stop the others.
+     *
+     * @param array<string,mixed> $payload
+     *
+     * @return int how many hubs accepted it
+     */
+    private function broadcastHeartbeat(array $payload): int
+    {
+        $primary = $this->hubs->primary();
+        $accepted = 0;
+
+        foreach ($this->hubs->all() as $hubUrl) {
+            $isPrimary = $hubUrl === $primary;
+
+            try {
+                // The primary goes through the pre-configured `ssai.hub` scoped
+                // client so it picks up base_uri, auth and (in dev) the proxy
+                // that makes *.wip resolve from PHP; extras use the plain client
+                // with the same shared token. Same split as ssaiHubStatuses().
+                $response = $isPrimary
+                    ? $this->ssaiHubClient->request('POST', '/internal/depots/heartbeat', [
+                        'json' => $payload,
+                        'timeout' => 5.0,
+                    ])
+                    : $this->httpClient->request('POST', $hubUrl . '/internal/depots/heartbeat', [
+                        'json' => $payload,
+                        'headers' => ['X-Internal-Token' => (string) $this->ssaiHubToken],
+                        'timeout' => 5.0,
+                    ]);
+
+                $status = $response->getStatusCode();
+                if ($status >= 200 && $status < 300) {
+                    ++$accepted;
+
+                    continue;
+                }
+
+                $this->logger->warning('heartbeat: hub {hub} answered {status}', [
+                    'hub' => $hubUrl,
+                    'status' => $status,
+                ]);
+            } catch (HttpExceptionInterface $e) {
+                $this->logger->warning('heartbeat: hub {hub} unreachable: {err}', [
+                    'hub' => $hubUrl,
+                    'err' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $accepted;
     }
 
     /**
