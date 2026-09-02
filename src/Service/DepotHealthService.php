@@ -12,6 +12,7 @@ use Symfony\Component\Cache\Adapter\RedisAdapter;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\Process\Process;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
+use Survos\DepotBundle\Protocol\DepotProtocol;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 /**
@@ -33,6 +34,7 @@ final class DepotHealthService
         private readonly SsaiHubBroadcastList $hubs,
         #[Autowire('%env(default::AI_TOOLS_URL)%')] private readonly ?string $aiToolsUrl,
         #[Autowire('%env(default::SSAI_HUB_TOKEN)%')] private readonly ?string $ssaiHubToken,
+        #[Autowire('%env(default::AI_TOOLS_SHARED_DIR)%')] private readonly ?string $sharedDir,
         #[Autowire('%env(default::ZEBRA_USB_DEVICE)%')] private readonly ?string $zebraUsbDevice,
         #[Autowire('%env(default::DEPOT_EVENTS_DSN)%')] private readonly ?string $depotEventsDsn,
         private readonly DeviceRepository $deviceRepository,
@@ -169,6 +171,57 @@ final class DepotHealthService
     public function aiToolsStatus(): array
     {
         return $this->pingService($this->aiToolsUrl, $this->aiToolsClient, '/status');
+    }
+
+    /**
+     * What depot and ai-tools each believe about the constants they share.
+     *
+     * Worth showing on the status page because the failure it catches is
+     * invisible otherwise: ai-tools can be running, answering 200, and reported
+     * reachable in the heartbeat while pointed at a storage root that is empty,
+     * wrong, or non-existent -- so scans land uncropped with every signal green.
+     * A station that disagrees with itself should say so on its own front page.
+     *
+     * @return array{
+     *     sharedDir: ?string,
+     *     sharedDirExists: bool,
+     *     protocolVersion: int,
+     *     aiToolsSharedDir: ?string,
+     *     aiToolsProtocolVersion: ?int,
+     *     inSync: ?bool
+     * }
+     */
+    public function constantsStatus(): array
+    {
+        $sharedDir = trim((string) $this->sharedDir) ?: null;
+
+        $remoteDir = null;
+        $remoteVersion = null;
+        try {
+            $body = $this->aiToolsClient->request('GET', '/status', ['timeout' => 2.0])->toArray(false);
+            // ai-tools has always called this shared_image_dir; matching its
+            // existing key rather than inventing a second name for one value.
+            $remoteDir = \is_string($body['shared_image_dir'] ?? null) ? $body['shared_image_dir'] : null;
+            $remoteVersion = \is_int($body['protocol_version'] ?? null) ? $body['protocol_version'] : null;
+        } catch (\Throwable) {
+            // Unreachable ai-tools is already reported by aiToolsStatus(); here it
+            // just means "cannot compare", which is not the same as "mismatch".
+        }
+
+        $inSync = null;
+        if ($sharedDir !== null && $remoteDir !== null) {
+            $inSync = rtrim($sharedDir, '/') === rtrim($remoteDir, '/')
+                && (null === $remoteVersion || $remoteVersion === DepotProtocol::VERSION);
+        }
+
+        return [
+            'sharedDir' => $sharedDir,
+            'sharedDirExists' => $sharedDir !== null && is_dir($sharedDir),
+            'protocolVersion' => DepotProtocol::VERSION,
+            'aiToolsSharedDir' => $remoteDir,
+            'aiToolsProtocolVersion' => $remoteVersion,
+            'inSync' => $inSync,
+        ];
     }
 
     /**
