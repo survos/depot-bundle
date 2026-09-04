@@ -7,7 +7,6 @@ namespace Survos\DepotBundle\Service;
 use Survos\DepotBundle\Message\RunScanJobMessage;
 use Survos\DepotBundle\Util\LabelSequencer;
 use Survos\DepotBundle\Util\ScanPaths;
-use App\Entity\Capture;
 use Doctrine\ORM\EntityManagerInterface;
 use Survos\DepotBundle\Service\DepotIdentity;
 use Psr\Log\LoggerInterface;
@@ -34,6 +33,7 @@ final readonly class ScanJobRunner
         #[Autowire('%kernel.project_dir%')] private readonly string $projectDir,
         #[Autowire('%env(FILES_DATA_DIR)%')] private readonly string $filesDataDir,
         private readonly EntityManagerInterface $em,
+        private readonly CaptureRecorder $captureRecorder,
         private readonly DepotIdentity $identity,
         #[Autowire('%env(default::SCAN_JOB_AUTO_STOP_SECONDS)%')] private readonly ?string $autoStopAfterSecondsRaw = null,
     ) {
@@ -176,7 +176,7 @@ final readonly class ScanJobRunner
                         // Non-fatal by construction. The hand-off above is the critical
                         // path; failing to write a local index row must never lose a
                         // scan that ssai already has.
-                        $this->recordCaptures($tenant, $intakeCode, $accessionLabel, $sequence, $pair);
+                        $this->captureRecorder->record($tenant, $intakeCode, $accessionLabel, $sequence, $pair, 'scan-job');
                     } catch (\Throwable $e) {
                         $this->logger->error('ssai hand-off failed', ['jobId' => $jobId, 'sequence' => $sequence, 'error' => $e->getMessage()]);
                         $this->statusStore->update(['status' => 'failed', 'lastError' => $e->getMessage()]);
@@ -254,53 +254,4 @@ final readonly class ScanJobRunner
         }
     }
 
-    /**
-     * Writes a Capture row for each side of a scanned pair.
-     *
-     * The files already exist on disk -- ScanService wrote them -- so this only
-     * indexes them; nothing is copied. The path is stored as-is, which is what
-     * /captures/{id}/file serves and therefore what the station publishes through
-     * its tunnel.
-     *
-     * Wrapped whole in a catch: an appliance that cannot write its own index row
-     * must still finish the scan it is in the middle of.
-     *
-     * @param array{front: string, back: string} $pair
-     */
-    private function recordCaptures(string $tenant, string $intakeCode, string $accessionLabel, int $sequence, array $pair): void
-    {
-        try {
-            foreach (['front' => $sequence, 'back' => $sequence + 1] as $side => $sideSequence) {
-                $path = $pair[$side] ?? null;
-                if (!\is_string($path) || !is_file($path)) {
-                    continue;
-                }
-
-                $capture = new Capture(
-                    tenantId: $tenant,
-                    stationId: $this->identity->label(),
-                    filename: basename($path),
-                    mimeType: mime_content_type($path) ?: 'image/jpeg',
-                    sizeBytes: (int) filesize($path),
-                    localPath: $path,
-                    publicPath: null,
-                    metadata: [
-                        'source' => 'scan-job',
-                        'intakeCode' => $intakeCode,
-                        'accession' => $accessionLabel,
-                        'sequence' => $sideSequence,
-                        'side' => $side,
-                    ],
-                    intakeCode: $intakeCode,
-                    side: $side,
-                );
-
-                $this->em->persist($capture);
-            }
-
-            $this->em->flush();
-        } catch (\Throwable $e) {
-            $this->logger->warning('could not record local capture rows: {err}', ['err' => $e->getMessage()]);
-        }
-    }
 }

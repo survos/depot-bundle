@@ -25,6 +25,7 @@ final readonly class ScanTriggerService
         private readonly SsaiScanHubService $ssaiScanHubService,
         #[Autowire('%kernel.project_dir%')] private readonly string $projectDir,
         #[Autowire('%env(FILES_DATA_DIR)%')] private readonly string $filesDataDir,
+        private readonly CaptureRecorder $captureRecorder,
     ) {
     }
 
@@ -85,6 +86,13 @@ final readonly class ScanTriggerService
                 $pair['front'],
                 $pair['back'],
             );
+
+            // The station's own index row. Recording this only on the ssai-
+            // dispatched path left everything scanned through depot:scan:trigger
+            // invisible in the station's own search -- verified live: four
+            // postcards reached ssai as eight images while depot still listed
+            // nothing but six browser captures from July.
+            $this->captureRecorder->record($tenant, $intakeCode, (string) $accession, $sequence, $pair, 'scan-trigger');
 
             // The crop rect and analysis travel on their OWN call, exactly as
             // CropReportRunner does it on the live scan-job path.
