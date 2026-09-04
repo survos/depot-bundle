@@ -17,6 +17,10 @@ use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Attribute\Option;
 use Symfony\Component\Console\Command\Command;
 use Survos\DepotBundle\Service\ScanJobStatusStore;
+use Survos\DepotBundle\Message\RescanDevicesMessage;
+use Symfony\Component\Messenger\Attribute\AsMessageHandler;
+use Symfony\Component\Console\Output\BufferedOutput;
+use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\Messenger\Transport\Receiver\MessageCountAwareInterface;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
@@ -235,6 +239,29 @@ final class DepotSyncService
         // rather than one duplex sweep.
         'ET-3700' => 'photo_scanner',
     ];
+
+    /**
+     * Re-probe on demand, so an operator standing at the scanner is not watching a
+     * disabled button for up to two minutes after plugging it in or clearing a jam.
+     *
+     * Same work the schedule does, just now. Async on purpose: the request that asks
+     * for it returns immediately and the answer arrives on the next heartbeat, so a
+     * ~20s backend enumeration never sits inside a page load.
+     *
+     * Output goes to a buffer -- this runs in a worker with no terminal, and what it
+     * found reaches anyone who cares through the device rows and the heartbeat.
+     */
+    #[AsMessageHandler]
+    public function onRescanDevices(RescanDevicesMessage $message): void
+    {
+        $output = new BufferedOutput();
+        $this->scanDevices(new SymfonyStyle(new ArrayInput([]), $output));
+
+        $this->logger->info('device rescan on demand ({reason}): {result}', [
+            'reason' => $message->reason,
+            'result' => trim((string) preg_replace('/\s+/', ' ', $output->fetch())),
+        ]);
+    }
 
     #[AsCommand('depot:scan-devices', 'Probe for known hardware (scanimage -L) and record what\'s currently present -- slow (~20s), run on its own schedule, not the fast heartbeat path')]
     public function scanDevices(

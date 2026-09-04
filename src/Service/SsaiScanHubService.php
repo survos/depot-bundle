@@ -64,10 +64,13 @@ final class SsaiScanHubService
         string $accessionHint,
         int $frontSequence,
         string $frontPath,
-        string $backPath,
+        // Null for a sheet the station scanned on one side, because the intake
+        // profile has a single image role. The hub reads an absent backFilename
+        // as "this sheet has one side" and consumes no sequence for a reverse.
+        ?string $backPath = null,
     ): array {
-        if (!is_file($frontPath) || !is_file($backPath)) {
-            throw new \RuntimeException(sprintf('Cannot register scan files: %s, %s', $frontPath, $backPath));
+        if (!is_file($frontPath) || ($backPath !== null && !is_file($backPath))) {
+            throw new \RuntimeException(sprintf('Cannot register scan files: %s, %s', $frontPath, $backPath ?? '(none)'));
         }
 
         // Depot already has the file on local disk -- getimagesize() here is
@@ -77,7 +80,7 @@ final class SsaiScanHubService
         // thumbnail (via this depot's own imgproxy, see Depot::fastThumbnailUrl())
         // immediately, without touching the bytes at all.
         [$frontWidth, $frontHeight] = self::dimensions($frontPath);
-        [$backWidth, $backHeight] = self::dimensions($backPath);
+        [$backWidth, $backHeight] = $backPath !== null ? self::dimensions($backPath) : [0, 0];
 
         $json = [
             'tenantId'       => $tenantId,
@@ -85,7 +88,7 @@ final class SsaiScanHubService
             'accessionHint'  => $accessionHint,
             'frontSequence'  => $frontSequence,
             'frontFilename'  => basename($frontPath),
-            'backFilename'   => basename($backPath),
+            'backFilename'   => $backPath !== null ? basename($backPath) : null,
             'frontWidth'     => $frontWidth,
             'frontHeight'    => $frontHeight,
             'backWidth'      => $backWidth,

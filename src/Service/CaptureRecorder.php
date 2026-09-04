@@ -36,7 +36,14 @@ final readonly class CaptureRecorder
      * @param array{front: string, back: string} $pair
      * @param array{left:int,top:int,width:int,height:int}|null $cropRect
      */
-    public function record(string $tenant, string $intakeCode, string $accessionLabel, int $sequence, array $pair, string $source, ?array $cropRect = null, int $sidesPerItem = 2): void
+    /**
+     * @return string|null the reverse scan that should be discarded, or null. Returned
+     *                     rather than deleted here because the caller knows when it is
+     *                     safe: on the scan-job path the crop runs LATER, from a list of
+     *                     pending pairs, and deleting inline left it reporting
+     *                     "back_path not found" for every sheet.
+     */
+    public function record(string $tenant, string $intakeCode, string $accessionLabel, int $sequence, array $pair, string $source, ?array $cropRect = null, int $sidesPerItem = 2): ?string
     {
         try {
             // A one-role profile has no home for the reverse. The duplex ADF emits
@@ -49,8 +56,9 @@ final readonly class CaptureRecorder
             // pointing at it, and the operator has no way to find or clear it. The
             // profile said one side; the honest thing is to leave one side.
             $sides = ['front' => $sequence, 'back' => $sequence + 1];
+            $discardable = null;
             if ($sidesPerItem === 1) {
-                $this->discard($pair['back'] ?? null);
+                $discardable = $pair['back'] ?? null;
                 unset($sides['back']);
             }
 
@@ -92,16 +100,20 @@ final readonly class CaptureRecorder
             }
 
             $this->em->flush();
+
+            return $discardable;
         } catch (\Throwable $e) {
             $this->logger->warning('could not record local capture rows: {err}', ['err' => $e->getMessage()]);
+
+            return null;
         }
     }
 
     /**
-     * Remove a scan the profile has no role for. Failure is logged, never thrown:
-     * a leftover file is untidy, a broken batch is not.
+     * Remove a scan the profile has no role for. Public so a caller can run it once the
+     * file is genuinely finished with -- see record()'s return.
      */
-    private function discard(?string $path): void
+    public function discard(?string $path): void
     {
         if (!\is_string($path) || !is_file($path)) {
             return;
@@ -111,4 +123,5 @@ final readonly class CaptureRecorder
             $this->logger->warning('could not delete unused reverse scan {path}', ['path' => $path]);
         }
     }
+
 }

@@ -83,6 +83,31 @@ final class ScanService
      *
      * @return list<string>
      */
+    /**
+     * The ADF source to ask for.
+     *
+     * Simplex when the intake profile has one image role: the scanner then emits one
+     * file per sheet instead of two, so a reverse is never digitised, never transferred
+     * and never written. Previously it was always duplex and the unwanted side was
+     * dealt with afterwards -- forwarded to the hub, indexed on the station, then marked
+     * `ignored` on arrival. Not scanning it is strictly better than three systems
+     * agreeing to throw it away.
+     *
+     * The station's configured source stays the default, so a hub that says nothing
+     * behaves exactly as before.
+     */
+    private function sourceFor(int $sidesPerItem): string
+    {
+        if ($sidesPerItem !== 1) {
+            return $this->source;
+        }
+
+        // "ADF Front" is the FF-680W's simplex source. Falls back to whatever the
+        // station configured if it is already a single-sided source, so an operator
+        // who set this deliberately is not overridden.
+        return str_contains(strtolower($this->source), 'duplex') ? 'ADF Front' : $this->source;
+    }
+
     private function acquireArea(?int $widthMm = null, ?int $heightMm = null): array
     {
         $mm = $widthMm !== null && $widthMm > 0
@@ -172,7 +197,7 @@ final class ScanService
      *
      * @return list<array{front: string, back: string}>
      */
-    public function scanDuplexBatch(string $outputDir, ?int $widthMm = null, ?int $heightMm = null): array
+    public function scanDuplexBatch(string $outputDir, ?int $widthMm = null, ?int $heightMm = null, int $sidesPerItem = 2): array
     {
         if (!is_dir($outputDir) && !mkdir($outputDir, 0775, true) && !is_dir($outputDir)) {
             throw new \RuntimeException(sprintf('Failed to create scan output directory: %s', $outputDir));
@@ -201,7 +226,7 @@ final class ScanService
             (new Process([
                 'scanimage',
                 '-d', $device,
-                '--source', $this->source,
+                '--source', $this->sourceFor($sidesPerItem),
                 '--mode', $this->mode,
                 '--resolution', $this->resolution,
                 '--format=' . $this->format(),
@@ -232,7 +257,7 @@ final class ScanService
             throw new \RuntimeException('Scan produced no output files — check that paper is loaded in the feeder.');
         }
 
-        return $this->pairFiles($files);
+        return $this->pairFiles($files, $sidesPerItem);
     }
 
     /**
@@ -257,7 +282,7 @@ final class ScanService
      *
      * @return \Generator<array{front: string, back: string}>
      */
-    public function scanDuplexBatchStream(string $outputDir, ?int $widthMm = null, ?int $heightMm = null): \Generator
+    public function scanDuplexBatchStream(string $outputDir, ?int $widthMm = null, ?int $heightMm = null, int $sidesPerItem = 2): \Generator
     {
         if (!is_dir($outputDir) && !mkdir($outputDir, 0775, true) && !is_dir($outputDir)) {
             throw new \RuntimeException(sprintf('Failed to create scan output directory: %s', $outputDir));
@@ -270,7 +295,7 @@ final class ScanService
         $process = new Process([
             'scanimage',
             '-d', $device,
-            '--source', $this->source,
+            '--source', $this->sourceFor($sidesPerItem),
             '--mode', $this->mode,
             '--resolution', $this->resolution,
             '--format=' . $this->format(),
@@ -389,15 +414,22 @@ final class ScanService
             throw new \RuntimeException(sprintf('No page-* image files found in %s.', $outputDir));
         }
 
-        return $this->pairFiles($files);
+        return $this->pairFiles($files, $sidesPerItem);
     }
 
     /**
      * @param list<string> $files
      * @return list<array{front: string, back: string}>
      */
-    private function pairFiles(array $files): array
+    private function pairFiles(array $files, int $sidesPerItem = 2): array
     {
+        // Simplex: one file per sheet, so there is nothing to pair and an odd count is
+        // normal rather than a misfeed. The back is null all the way through, which is
+        // what tells the hub this sheet has one side.
+        if ($sidesPerItem === 1) {
+            return array_map(static fn (string $file): array => ['front' => $file, 'back' => null], $files);
+        }
+
         if (\count($files) % 2 !== 0) {
             throw new \RuntimeException(sprintf(
                 'Expected an even number of duplex pages, got %d — a page may have jammed or misfed.',

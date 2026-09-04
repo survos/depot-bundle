@@ -46,7 +46,7 @@ final readonly class ScanTriggerService
 
         $pairs = $fakeScan
             ? $this->scanService->pairExistingScans($outputDir)
-            : $this->scanService->scanDuplexBatch($outputDir);
+            : $this->scanService->scanDuplexBatch($outputDir, null, null, $sidesPerItem);
 
         $accession = $startingAccession;
         $sequence = 1;
@@ -63,7 +63,7 @@ final readonly class ScanTriggerService
                 // 2026-08-03. Let failures propagate -- HomeController
                 // already catches and flashes them as scan_error.
                 try {
-                    $cropResult = $this->aiToolsService->autocropPair($pair['front'], $pair['back']);
+                    $cropResult = $this->aiToolsService->autocropPair($pair['front'], $pair['back'] ?? null);
                 } catch (\Throwable $e) {
                     throw new \RuntimeException('Crop failed (is ai-tools running?): ' . $e->getMessage(), previous: $e);
                 }
@@ -92,7 +92,11 @@ final readonly class ScanTriggerService
             // invisible in the station's own search -- verified live: four
             // postcards reached ssai as eight images while depot still listed
             // nothing but six browser captures from July.
-            $this->captureRecorder->record($tenant, $intakeCode, (string) $accession, $sequence, $pair, 'scan-trigger', $rect);
+            $discardable = $this->captureRecorder->record($tenant, $intakeCode, (string) $accession, $sequence, $pair, 'scan-trigger', $rect, $sidesPerItem);
+
+            // Safe immediately on this path: the crop already ran inline above, before
+            // the hand-off, so nothing later reads the reverse off disk.
+            $this->captureRecorder->discard($discardable);
 
             // The crop rect and analysis travel on their OWN call, exactly as
             // CropReportRunner does it on the live scan-job path.

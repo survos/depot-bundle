@@ -35,8 +35,17 @@ final class AiToolsService
      *
      * @return array{ok: bool, reason?: string, rect?: array{center: array{0: float, 1: float}, size: array{0: float, 1: float}, angle: float}, analysis?: array}&array<string, mixed>
      */
-    public function autocropPair(string $frontPath, string $backPath): array
+    /**
+     * $backPath is optional. The rectangle is derived from the FRONT and merely applied
+     * to the back -- a blank reverse would clip real handwriting if detected on its own,
+     * which is exactly why this is pair-aware. So a sheet scanned on one side needs no
+     * second file and no second endpoint: passing the front twice gives the same rect,
+     * and both _out paths are throwaway temps that get cleaned up either way.
+     */
+    public function autocropPair(string $frontPath, ?string $backPath = null): array
     {
+        $backPath ??= $frontPath;
+
         // tempnam() itself creates an empty file at an extensionless path --
         // ai-tools writes via OpenCV's cv2.imwrite(), which picks the output
         // format from the path's extension and errors ("could not find a

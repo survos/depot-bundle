@@ -144,9 +144,10 @@ final readonly class ScanJobRunner
             // only loses what hadn't been scanned yet -- see its own docblock.
             $pairsThisBatch = 0;
             $pendingCrops = [];
+            $discardAfterCrop = [];
 
             try {
-                foreach ($this->scanService->scanDuplexBatchStream($outputDir, $feederWidthMm, $feederHeightMm) as $pair) {
+                foreach ($this->scanService->scanDuplexBatchStream($outputDir, $feederWidthMm, $feederHeightMm, $sidesPerItem) as $pair) {
                     $waitingSince = null;
                     $pairsThisBatch++;
 
@@ -179,7 +180,13 @@ final readonly class ScanJobRunner
                         // Non-fatal by construction. The hand-off above is the critical
                         // path; failing to write a local index row must never lose a
                         // scan that ssai already has.
-                        $this->captureRecorder->record($tenant, $intakeCode, $accessionLabel, $sequence, $pair, 'scan-job', null, $sidesPerItem);
+                        $discardable = $this->captureRecorder->record($tenant, $intakeCode, $accessionLabel, $sequence, $pair, 'scan-job', null, $sidesPerItem);
+                        if ($discardable !== null) {
+                            // Held until the crops below have run: they read both paths
+                            // off disk, and deleting inline made every crop on a
+                            // one-sided intake fail with "back_path not found".
+                            $discardAfterCrop[] = $discardable;
+                        }
                     } catch (\Throwable $e) {
                         $this->logger->error('ssai hand-off failed', ['jobId' => $jobId, 'sequence' => $sequence, 'error' => $e->getMessage()]);
                         $this->statusStore->update(['status' => 'failed', 'lastError' => $e->getMessage()]);
@@ -247,6 +254,12 @@ final readonly class ScanJobRunner
             foreach ($pendingCrops as $pending) {
                 $this->cropReportRunner->run($tenant, $intakeCode, $pending['sequence'], $pending['pair']['front'], $pending['pair']['back']);
             }
+
+            // Now the reverse scans are genuinely finished with.
+            foreach ($discardAfterCrop as $path) {
+                $this->captureRecorder->discard($path);
+            }
+            $discardAfterCrop = [];
 
             try {
                 $this->ssaiScanJobHubService->heartbeat($jobId, $pairsThisBatch);

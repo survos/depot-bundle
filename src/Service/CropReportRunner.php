@@ -25,7 +25,7 @@ final readonly class CropReportRunner
     ) {
     }
 
-    public function run(string $tenant, string $intakeCode, int $frontSequence, string $frontPath, string $backPath): void
+    public function run(string $tenant, string $intakeCode, int $frontSequence, string $frontPath, ?string $backPath = null): void
     {
         try {
             $result = $this->aiToolsService->autocropPair($frontPath, $backPath);
