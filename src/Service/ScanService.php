@@ -83,17 +83,29 @@ final class ScanService
      *
      * @return list<string>
      */
-    private function acquireArea(): array
+    private function acquireArea(?int $widthMm = null, ?int $heightMm = null): array
     {
-        $mm = (float) trim((string) $this->feederWidthMm);
+        $mm = $widthMm !== null && $widthMm > 0
+            ? (float) $widthMm
+            : (float) trim((string) $this->feederWidthMm);
+
         if ($mm <= 0) {
             return [];
         }
 
+        // Both edges when the operator named a size, and the capture is the print.
+        // Only the width when they did not -- a mixed stack, or no size picked -- and
+        // it degrades to the width x width square this used to always be. That square
+        // is safe because nothing loaded landscape can be taller than the guides are
+        // wide, but it is loose: a 3.5x5 fed landscape is 127 x 89mm, so the square
+        // digitises 38mm of bare bed on every sheet, roughly a third of the pixels,
+        // transferred over USB and then cropped away downstream.
+        $height = $heightMm !== null && $heightMm > 0 ? (float) $heightMm : $mm;
+
         // Clamped to the bed. -x is limited to 215.9mm and -y to 393.7mm on the FF-680W;
         // asking for more is an error, not a bigger scan.
         $x = min($mm, 215.9);
-        $y = min($mm, 393.7);
+        $y = min($height, 393.7);
 
         return ['-x', (string) $x, '-y', (string) $y];
     }
@@ -160,7 +172,7 @@ final class ScanService
      *
      * @return list<array{front: string, back: string}>
      */
-    public function scanDuplexBatch(string $outputDir): array
+    public function scanDuplexBatch(string $outputDir, ?int $widthMm = null, ?int $heightMm = null): array
     {
         if (!is_dir($outputDir) && !mkdir($outputDir, 0775, true) && !is_dir($outputDir)) {
             throw new \RuntimeException(sprintf('Failed to create scan output directory: %s', $outputDir));
@@ -193,7 +205,7 @@ final class ScanService
                 '--mode', $this->mode,
                 '--resolution', $this->resolution,
                 '--format=' . $this->format(),
-                ...$this->acquireArea(),
+                ...$this->acquireArea($widthMm, $heightMm),
                 '--batch=' . $pattern,
                 '--batch-start=' . $batchStart,
             ], timeout: 300))->mustRun();
@@ -245,7 +257,7 @@ final class ScanService
      *
      * @return \Generator<array{front: string, back: string}>
      */
-    public function scanDuplexBatchStream(string $outputDir): \Generator
+    public function scanDuplexBatchStream(string $outputDir, ?int $widthMm = null, ?int $heightMm = null): \Generator
     {
         if (!is_dir($outputDir) && !mkdir($outputDir, 0775, true) && !is_dir($outputDir)) {
             throw new \RuntimeException(sprintf('Failed to create scan output directory: %s', $outputDir));
@@ -262,7 +274,7 @@ final class ScanService
             '--mode', $this->mode,
             '--resolution', $this->resolution,
             '--format=' . $this->format(),
-            ...$this->acquireArea(),
+            ...$this->acquireArea($widthMm, $heightMm),
             '--batch=' . $pattern,
             '--batch-start=' . $batchStart,
         ], timeout: 300);

@@ -57,13 +57,16 @@ final readonly class ScanJobRunner
             $message->tenantId,
             true,
             1,
+            $message->sidesPerItem,
+            $message->feederWidthMm,
+            $message->feederHeightMm,
         );
     }
 
     /**
      * @param array{id: int, tenantId?: string, intakeCode: string, status?: string, startingLabel: ?string} $job
      */
-    public function run(array $job, string $tenant, bool $crop, int $retryInterval): void
+    public function run(array $job, string $tenant, bool $crop, int $retryInterval, int $sidesPerItem = 2, ?int $feederWidthMm = null, ?int $feederHeightMm = null): void
     {
         $jobId = $job['id'];
         $intakeCode = $job['intakeCode'];
@@ -143,7 +146,7 @@ final readonly class ScanJobRunner
             $pendingCrops = [];
 
             try {
-                foreach ($this->scanService->scanDuplexBatchStream($outputDir) as $pair) {
+                foreach ($this->scanService->scanDuplexBatchStream($outputDir, $feederWidthMm, $feederHeightMm) as $pair) {
                     $waitingSince = null;
                     $pairsThisBatch++;
 
@@ -176,7 +179,7 @@ final readonly class ScanJobRunner
                         // Non-fatal by construction. The hand-off above is the critical
                         // path; failing to write a local index row must never lose a
                         // scan that ssai already has.
-                        $this->captureRecorder->record($tenant, $intakeCode, $accessionLabel, $sequence, $pair, 'scan-job');
+                        $this->captureRecorder->record($tenant, $intakeCode, $accessionLabel, $sequence, $pair, 'scan-job', null, $sidesPerItem);
                     } catch (\Throwable $e) {
                         $this->logger->error('ssai hand-off failed', ['jobId' => $jobId, 'sequence' => $sequence, 'error' => $e->getMessage()]);
                         $this->statusStore->update(['status' => 'failed', 'lastError' => $e->getMessage()]);

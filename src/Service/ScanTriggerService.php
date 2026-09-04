@@ -92,7 +92,7 @@ final readonly class ScanTriggerService
             // invisible in the station's own search -- verified live: four
             // postcards reached ssai as eight images while depot still listed
             // nothing but six browser captures from July.
-            $this->captureRecorder->record($tenant, $intakeCode, (string) $accession, $sequence, $pair, 'scan-trigger');
+            $this->captureRecorder->record($tenant, $intakeCode, (string) $accession, $sequence, $pair, 'scan-trigger', $rect);
 
             // The crop rect and analysis travel on their OWN call, exactly as
             // CropReportRunner does it on the live scan-job path.

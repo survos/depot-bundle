@@ -34,11 +34,27 @@ final readonly class CaptureRecorder
 
     /**
      * @param array{front: string, back: string} $pair
+     * @param array{left:int,top:int,width:int,height:int}|null $cropRect
      */
-    public function record(string $tenant, string $intakeCode, string $accessionLabel, int $sequence, array $pair, string $source): void
+    public function record(string $tenant, string $intakeCode, string $accessionLabel, int $sequence, array $pair, string $source, ?array $cropRect = null, int $sidesPerItem = 2): void
     {
         try {
-            foreach (['front' => $sequence, 'back' => $sequence + 1] as $side => $sideSequence) {
+            // A one-role profile has no home for the reverse. The duplex ADF emits
+            // it anyway, so it is deleted here rather than indexed: keeping it made
+            // the station's search show fifteen photographs as thirty rows, half of
+            // them blank card backs, and ssai marked every one `ignored` on arrival.
+            //
+            // Deleted, not just skipped. A file nobody indexed is worse than one
+            // nobody kept -- it sits on the station's disk forever with no row
+            // pointing at it, and the operator has no way to find or clear it. The
+            // profile said one side; the honest thing is to leave one side.
+            $sides = ['front' => $sequence, 'back' => $sequence + 1];
+            if ($sidesPerItem === 1) {
+                $this->discard($pair['back'] ?? null);
+                unset($sides['back']);
+            }
+
+            foreach ($sides as $side => $sideSequence) {
                 $path = $pair[$side] ?? null;
                 if (!\is_string($path) || !is_file($path)) {
                     continue;
@@ -60,6 +76,13 @@ final readonly class CaptureRecorder
                         'accession' => $accessionLabel,
                         'sequence' => $sideSequence,
                         'side' => $side,
+                        // The rect ai-tools computed for this pair, so the station's
+                        // own search can render the PHOTO rather than the whole bed.
+                        // Without it the search thumbnail was the raw scan -- a print
+                        // in the top half and white scanner bed below, which is what
+                        // it looked like: terrible. ssai has always applied this to
+                        // its own URLs; depot simply never kept it.
+                        'cropRect' => $cropRect,
                     ],
                     intakeCode: $intakeCode,
                     side: $side,
@@ -71,6 +94,21 @@ final readonly class CaptureRecorder
             $this->em->flush();
         } catch (\Throwable $e) {
             $this->logger->warning('could not record local capture rows: {err}', ['err' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Remove a scan the profile has no role for. Failure is logged, never thrown:
+     * a leftover file is untidy, a broken batch is not.
+     */
+    private function discard(?string $path): void
+    {
+        if (!\is_string($path) || !is_file($path)) {
+            return;
+        }
+
+        if (!@unlink($path)) {
+            $this->logger->warning('could not delete unused reverse scan {path}', ['path' => $path]);
         }
     }
 }

@@ -57,7 +57,21 @@ final class ScanJobTriggerController extends AbstractController
             return new JsonResponse(['ok' => false, 'reason' => 'invalid_payload'], 400);
         }
 
-        $this->messageBus->dispatch(new RunScanJobMessage($jobId, $tenantId, $intakeCode, $startingLabel));
+        $sides = (int) ($payload['sidesPerItem'] ?? 2);
+        $sides = $sides === 1 ? 1 : 2;
+
+        $width  = isset($payload['feederWidthMm'])  ? (int) $payload['feederWidthMm']  : 0;
+        $height = isset($payload['feederHeightMm']) ? (int) $payload['feederHeightMm'] : 0;
+
+        $this->messageBus->dispatch(new RunScanJobMessage(
+            $jobId,
+            $tenantId,
+            $intakeCode,
+            $startingLabel,
+            $sides,
+            $width > 0 ? $width : null,
+            $height > 0 ? $height : null,
+        ));
 
         return new JsonResponse(['ok' => true, 'accepted' => true], 202);
     }
