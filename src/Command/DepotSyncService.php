@@ -16,7 +16,9 @@ use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Attribute\Option;
 use Symfony\Component\Console\Command\Command;
+use Survos\DepotBundle\Service\ScanJobStatusStore;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Symfony\Component\Messenger\Transport\Receiver\MessageCountAwareInterface;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\Process\Process;
 
@@ -54,6 +56,8 @@ final class DepotSyncService
         #[Autowire(service: 'ssai.hub')] private readonly HttpClientInterface $ssaiHubClient,
         private readonly HttpClientInterface $httpClient,
         #[Autowire('%env(default::SSAI_HUB_TOKEN)%')] private readonly ?string $ssaiHubToken,
+        private readonly ScanJobStatusStore $scanJobStatus,
+        #[Autowire(service: 'messenger.transport.scan_jobs')] private readonly MessageCountAwareInterface $scanJobsTransport,
     ) {
     }
 
@@ -82,6 +86,32 @@ final class DepotSyncService
             'capabilities' => $capabilities,
             'imgproxyUrl' => $imgproxyUrl !== '' ? $imgproxyUrl : null,
             'aiToolsReachable' => $aiToolsReachable,
+            // Everything below this line used to be reachable ONLY by tunnelling
+            // into /internal/status with the station's token. That made the most
+            // useful diagnostic in the system invisible to the system that needs
+            // it: when a scan POST failed, the hub returned the error and then
+            // had no idea it had happened, while the operator watched a capture
+            // page that showed nothing at all -- no images, no error, no reason.
+            //
+            // It rides the heartbeat because the heartbeat already exists, already
+            // runs every 15s, and already reaches every hub. No new transport, no
+            // new auth, nothing new to expose.
+            //
+            // Deliberately NOT here: a live scanner probe. scanimage -L's backend
+            // enumeration measures ~20s, which is why depot:scan-devices owns it
+            // on a slower schedule. `capabilities` above already reflects the
+            // cached result; a hub that wants a fresh answer asks /internal/status
+            // with ?probe=1 and pays the 20s itself.
+            //
+            // Also not here: whether the scheduler is running. This command IS the
+            // scheduler's work -- if the hub is reading these fields, the answer is
+            // yes. Its absence is the signal, which is how a dead scheduler was
+            // actually found: heartbeat frozen while the web app stayed up.
+            'status' => [
+                'scanWorkerActive' => $this->health->scanWorkerActive(),
+                'scanJobsQueued' => $this->scanJobsQueued(),
+                'currentJob' => $this->currentJob(),
+            ],
         ];
 
         // The authoritative write. Each hub records this over HTTP, so a station
@@ -196,7 +226,14 @@ final class DepotSyncService
      * @var array<string, string>
      */
     private const CAPABILITY_BY_MODEL = [
+        // Sheet-fed duplex ADF: scans front and back in one pass, which is what
+        // the front/back intake profiles are built around.
         'FF-680W' => 'photo_scanner',
+        // Flatbed multifunction, reached over the network (escl/airscan). It is
+        // a photo_scanner in the sense that matters here -- depot can drive it --
+        // but it has no ADF, so a front/back profile means two passes by hand
+        // rather than one duplex sweep.
+        'ET-3700' => 'photo_scanner',
     ];
 
     #[AsCommand('depot:scan-devices', 'Probe for known hardware (scanimage -L) and record what\'s currently present -- slow (~20s), run on its own schedule, not the fast heartbeat path')]
@@ -220,7 +257,16 @@ final class DepotSyncService
 
         $found = 0;
         foreach (explode("\n", $process->getOutput()) as $line) {
-            if (preg_match('/^device `([^\x27]+)\x27 is a (.+)$/', trim($line), $m) !== 1) {
+            // Not anchored at line start on purpose. A backend that probes an HTTP
+            // endpoint can dump a whole HTML page into this output with no trailing
+            // newline, so the first real device arrives welded to it:
+            //
+            //   </body></HTML>device `v4l:/dev/video0' is a ...
+            //
+            // Anchored, that line never matched and the first device on the bus was
+            // silently invisible -- observed live, where it happened to be a webcam
+            // and could just as easily have been the scanner.
+            if (preg_match('/device `([^\x27]+)\x27 is a (.+)$/', trim($line), $m) !== 1) {
                 continue;
             }
             [, $device, $model] = $m;
@@ -247,5 +293,46 @@ final class DepotSyncService
         $io->text('ai-tools: ' . ($aiToolsReachable ? 'reachable' : 'NOT reachable'));
 
         return Command::SUCCESS;
+    }
+
+    /**
+     * Queue depth, defensively. A transport that cannot be counted must not take
+     * the heartbeat down with it -- presence is the heartbeat's primary job and
+     * this block is an extra.
+     */
+    private function scanJobsQueued(): ?int
+    {
+        try {
+            return $this->scanJobsTransport->getMessageCount();
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * The scan job this station last worked on, including the error that ended
+     * it. lastError is the field that matters: it is where "HTTP/2 502 returned
+     * for /internal/scans" lives, and until now the hub that issued that 502
+     * could not see it.
+     *
+     * @return array<string, mixed>
+     */
+    private function currentJob(): array
+    {
+        try {
+            $job = $this->scanJobStatus->read();
+        } catch (\Throwable) {
+            return [];
+        }
+
+        return [
+            'jobId' => $job['jobId'] ?? null,
+            'intakeCode' => $job['intakeCode'] ?? null,
+            'status' => $job['status'] ?? null,
+            'lastError' => $job['lastError'] ?? null,
+            'startedAt' => $job['startedAt'] ?? null,
+            'lastActivityAt' => $job['lastActivityAt'] ?? null,
+            'lastSuccessfulScanAt' => $job['lastSuccessfulScanAt'] ?? null,
+        ];
     }
 }
