@@ -26,6 +26,19 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 final class DepotHealthService
 {
     private const AI_TOOLS_HEALTH_CACHE_KEY = 'depot.ai_tools_reachable';
+    private const LAST_PROBE_CACHE_KEY = 'depot.devices_last_probed_at';
+
+    /**
+     * Models with a sheet-fed ADF, i.e. the ones a front/back intake profile can
+     * actually run in a single duplex pass.
+     *
+     * The distinction matters because 'photo_scanner' is satisfied by any scanner
+     * depot can drive, including the networked ET-3700 flatbed. A station with only
+     * that reachable reports a scanner and still cannot run the duplex profiles the
+     * intake workflow is built around, so "a scanner exists" and "the work can
+     * proceed" are genuinely different questions and are answered separately.
+     */
+    private const SHEET_FED_MODELS = ['FF-680W'];
 
     public function __construct(
         #[Autowire(service: 'ai_tools')] private readonly HttpClientInterface $aiToolsClient,
@@ -75,6 +88,86 @@ final class DepotHealthService
     public function scannerDetected(): bool
     {
         return $this->deviceRepository->hasFreshCapability('photo_scanner', Device::FRESH_TTL_SECONDS);
+    }
+
+    /**
+     * A sheet-fed ADF scanner is present, not merely some scanner.
+     *
+     * scannerDetected() above answers the capability question and is what the
+     * heartbeat advertises; this answers the operational one -- whether the duplex
+     * front/back profiles can run at all. See SHEET_FED_MODELS.
+     */
+    public function feederDetected(): bool
+    {
+        return $this->freshSheetFedDevice() !== null;
+    }
+
+    private function freshSheetFedDevice(): ?Device
+    {
+        foreach ($this->deviceRepository->freshDevices(Device::FRESH_TTL_SECONDS) as $device) {
+            foreach (self::SHEET_FED_MODELS as $needle) {
+                if (str_contains($device->model, $needle)) {
+                    return $device;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Everything a status panel needs to tell the truth about the hardware, in one
+     * read: which devices are currently present, whether one of them can feed
+     * sheets, and when a probe last actually ran.
+     *
+     * That last field is recorded by the probe itself (recordProbeRun()) rather than
+     * derived from the freshest device row, because a probe that finds nothing
+     * writes no row at all. Timestamping the *read* instead -- which is what this
+     * used to do -- reports a live reading whenever anyone loads the page, including
+     * when the probe has been dead for hours.
+     *
+     * @return array{detected: bool, feeder: bool, probedAt: ?string, devices: list<array<string, mixed>>}
+     */
+    public function scannerSnapshot(): array
+    {
+        $fresh = $this->deviceRepository->freshDevices(Device::FRESH_TTL_SECONDS);
+        $sheetFed = $this->freshSheetFedDevice();
+
+        $devices = [];
+        foreach ($fresh as $device) {
+            $devices[] = [
+                'device' => $device->device,
+                'model' => $device->model,
+                'capability' => $device->capability,
+                'sheetFed' => $sheetFed !== null && $device->device === $sheetFed->device,
+                'detectedAt' => $device->detectedAt->format(\DateTimeInterface::ATOM),
+            ];
+        }
+
+        return [
+            'detected' => $this->scannerDetected(),
+            'feeder' => $sheetFed !== null,
+            'probedAt' => $this->lastProbeAt()?->format(\DateTimeInterface::ATOM),
+            'devices' => $devices,
+        ];
+    }
+
+    /** Called by depot:scan-devices once a probe has actually completed. */
+    public function recordProbeRun(): void
+    {
+        $item = $this->cache->getItem(self::LAST_PROBE_CACHE_KEY);
+        $item->set((new \DateTimeImmutable())->format(\DateTimeInterface::ATOM));
+        $this->cache->save($item);
+    }
+
+    public function lastProbeAt(): ?\DateTimeImmutable
+    {
+        $item = $this->cache->getItem(self::LAST_PROBE_CACHE_KEY);
+        if (!$item->isHit() || !\is_string($value = $item->get())) {
+            return null;
+        }
+
+        return new \DateTimeImmutable($value);
     }
 
     private function labelPrinterDetected(): bool

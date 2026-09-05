@@ -271,6 +271,17 @@ final class DepotSyncService
         if ($purge) {
             $this->deviceRepository->purge();
             $io->text('Purged existing device rows.');
+        } elseif (($bootedAt = $this->bootedAt()) !== null) {
+            // Bootstrap: a row written before this machine booted describes whatever
+            // was plugged in during some previous session and nothing about now.
+            // Dropping those here means the station can never *start* from stale
+            // hardware readings, without anyone having to remember --purge or plug
+            // the scanner in before powering on. After the first probe of a boot
+            // there is nothing left to match, so this costs one indexed DELETE.
+            $dropped = $this->deviceRepository->purgeDetectedBefore($bootedAt);
+            if ($dropped > 0) {
+                $io->text(sprintf('Dropped %d device row(s) left over from before this boot.', $dropped));
+            }
         }
 
         try {
@@ -311,6 +322,12 @@ final class DepotSyncService
         $io->text($found > 0
             ? sprintf('%d known device(s) recorded.', $found)
             : 'No known devices found.');
+
+        // Record that a probe ran, separately from what it found: a probe finding
+        // nothing writes no device row, so "when did we last actually look" cannot
+        // be derived from the rows themselves. StatusController reports this as
+        // probedAt rather than stamping the moment someone read the page.
+        $this->health->recordProbeRun();
 
         // Piggybacked on this cadence rather than the 15s heartbeat: it's a
         // ~2s HTTP round-trip, the same reasoning that already keeps
@@ -361,5 +378,26 @@ final class DepotSyncService
             'lastActivityAt' => $job['lastActivityAt'] ?? null,
             'lastSuccessfulScanAt' => $job['lastSuccessfulScanAt'] ?? null,
         ];
+    }
+
+    /**
+     * When this machine last booted, or null where that cannot be determined.
+     *
+     * Reads /proc/uptime, which is Linux-only -- the appliance stations are Linux,
+     * and on a dev Mac this simply returns null and the pre-boot purge is skipped
+     * rather than guessing a boot time and deleting rows that are still valid.
+     */
+    private function bootedAt(): ?\DateTimeImmutable
+    {
+        if (!is_readable('/proc/uptime')) {
+            return null;
+        }
+
+        $uptime = (float) strtok((string) @file_get_contents('/proc/uptime'), ' ');
+        if ($uptime <= 0.0) {
+            return null;
+        }
+
+        return new \DateTimeImmutable('@' . (time() - (int) $uptime));
     }
 }

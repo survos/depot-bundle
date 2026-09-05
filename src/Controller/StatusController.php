@@ -13,24 +13,22 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Messenger\Transport\Receiver\MessageCountAwareInterface;
 use Symfony\Component\Process\Process;
 use Symfony\Component\Routing\Attribute\Route;
-use Symfony\Contracts\Cache\CacheInterface;
-use Symfony\Contracts\Cache\ItemInterface;
 
 /**
  * Remote diagnosability for a headless, cloudflared-only appliance -- see
  * the GitHub issue this was built for: a real ScanJob sat at pairs_scanned=0
  * for several minutes with zero visibility into whether the consumer ever
  * picked up the message, the scanner was detected, or something failed
- * silently before ever calling ssai's fail(). Cheap and fast by default (no
- * live hardware probe on every ping -- scanner detection is cached and only
- * re-probed on request, per the issue's own suggestion).
+ * silently before ever calling ssai's fail(). Cheap by construction: the slow
+ * `scanimage -L` enumeration belongs to depot:scan-devices on its own schedule,
+ * so this only reads what that last wrote. POST /internal/devices/rescan forces
+ * a fresh probe when an operator is standing at the machine.
  */
 final class StatusController extends AbstractController
 {
     public function __construct(
         private readonly ScanJobStatusStore $statusStore,
         private readonly DepotHealthService $health,
-        private readonly CacheInterface $cache,
         #[Autowire(service: 'messenger.transport.scan_jobs')] private readonly MessageCountAwareInterface $scanJobsTransport,
         #[Autowire('%env(DEPOT_INBOUND_TOKEN)%')] private readonly string $expectedToken,
         #[Autowire('%kernel.project_dir%')] private readonly string $projectDir,
@@ -44,14 +42,13 @@ final class StatusController extends AbstractController
             return new JsonResponse(['ok' => false, 'reason' => 'unauthorized'], 401);
         }
 
-        $forceProbe = $request->query->get('probe') === '1';
         $job = $this->statusStore->read();
 
         return new JsonResponse([
             'ok'               => true,
             'version'          => $this->gitCommit(),
             'depotWebUptimeS'  => $this->depotWebUptimeSeconds(),
-            'scanner'          => $this->probeScanner($forceProbe),
+            'scanner'          => $this->health->scannerSnapshot(),
             'scanJobsQueued'   => $this->scanJobsTransport->getMessageCount(),
             'scanWorkerActive' => $this->health->scanWorkerActive(),
             'currentJob'       => [
@@ -64,23 +61,6 @@ final class StatusController extends AbstractController
                 'lastSuccessfulScanAt' => $job['lastSuccessfulScanAt'] ?? null,
             ],
         ]);
-    }
-
-    /**
-     * @return array{detected: bool, probedAt: string}
-     */
-    private function probeScanner(bool $forceRefresh): array
-    {
-        $key = 'depot_status_scanner_probe';
-        if ($forceRefresh) {
-            $this->cache->delete($key);
-        }
-
-        return $this->cache->get($key, function (ItemInterface $item): array {
-            $item->expiresAfter(300);
-
-            return ['detected' => $this->health->scannerDetected(), 'probedAt' => (new \DateTimeImmutable())->format(\DateTimeInterface::ATOM)];
-        });
     }
 
     private function depotWebUptimeSeconds(): ?int
