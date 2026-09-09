@@ -81,7 +81,13 @@ final class DumpConstantsCommand
             'PROTOCOL_VERSION = ' . DepotProtocol::VERSION,
             '',
             '# Storage root for this station, as declared in its environment.',
-            'AI_TOOLS_SHARED_DIR = ' . json_encode($sharedDir),
+            // JSON_UNESCAPED_SLASHES matters: this is read by PYTHON, not JSON.
+            // Plain json_encode() escapes every slash, so a path came out as
+            // "\/Users\/tac\/..." -- and Python does not recognise \/ as an escape,
+            // so it keeps the backslashes verbatim. The result is a path that cannot
+            // resolve, plus a SyntaxWarning ("invalid escape sequence ... will not
+            // work in the future"). The command reported success either way.
+            'AI_TOOLS_SHARED_DIR = ' . json_encode($sharedDir, JSON_UNESCAPED_SLASHES),
             '',
         ];
 
